@@ -1,0 +1,244 @@
+# TVPM Validation Hub: Comprehensive Guide & Reference Manual
+
+This document provides a single, unified guide to the **TVPM Validation Hub**. It combines setup instructions, feature walk-throughs, project structure diagrams, and system architecture details.
+
+---
+
+## 🏗️ System Architecture
+
+The project is structured as a decoupled web application with a **FastAPI backend** (serving API requests) and a **Streamlit frontend** (interactive UI). It communicates with the LGE JIRA instance to validate issue applicability status based on SoC details.
+
+To optimize performance and add intelligent reasoning capabilities, the system uses a **local SQLite cache** to avoid redundant JIRA API calls, and interfaces with a **local Ollama LLM** to analyze compatibility tables and support natural language queries.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant FE as Frontend (Streamlit)
+    participant BE as Backend (FastAPI)
+    participant DB as SQLite Cache (tvpm_cache.db)
+    participant J as LGE JIRA API (or Mock response.json)
+    participant O as Local Ollama LLM (AI)
+
+    %% Validation Hub Flow
+    Note over User, O: -- Validation Hub Flow --
+    User->>FE: Upload Excel/HTML & enter Target SoC Name
+    FE->>BE: POST /api/validate (column, target_soc, mock, use_ai)
+    rect rgb(240, 240, 240)
+        Note over BE: For each TVPM ID in batch (asyncio.Semaphore 15)
+        BE->>DB: Query cached JIRA data
+        alt Cache Miss or Force Refresh
+            BE->>J: Fetch JIRA Issue (asynchronously)
+            J-->>BE: JIRA JSON payload
+            BE->>DB: Upsert Issue payload (raw_json, status, summary)
+        else Cache Hit
+            DB-->>BE: Cached JSON payload
+        end
+        Note over BE: Auto-detect SoC field in payload
+        alt use_ai = True
+            BE->>O: Query compatibility prompt (SoC Details, target_soc)
+            O-->>BE: Returns JSON (status, reason)
+        else use_ai = False
+            Note over BE: Standard regex/table parser resolves status
+        end
+    end
+    BE->>BE: Compile new DataFrame & write Excel
+    BE-->>FE: Return Excel stream
+    FE->>User: Show success dashboard & download button
+
+    %% TVPM Chat Assistant Flow
+    Note over User, O: -- TVPM Chat Assistant Flow --
+    User->>FE: Select TVPM key & ask natural language question
+    FE->>BE: POST /api/chat-tvpm (key, question)
+    BE->>DB: Fetch issue details & raw JIRA JSON
+    DB-->>BE: JIRA JSON
+    BE->>O: Send context-rich chat prompt (Issue Details + Question)
+    O-->>BE: Return answer text
+    BE-->>FE: Return answer JSON
+    FE->>User: Render chatbot response
+```
+
+---
+
+## 📋 Features
+
+* **Excel/HTML Ingestion**: Drag and drop any Excel file or HTML table disguised as `.xls`/`.xlsx` exported from LGE systems.
+* **Column Auto-Detection**: Automatically identifies the column containing TVPM IDs/JIRA keys by checking cell contents against JIRA key patterns.
+* **JIRA Mock Mode (Offline)**: Check the **Mock Mode** box in the sidebar to simulate JIRA API responses offline using the local `response.json` file.
+* **Dynamic JIRA Field Auto-Detection (Heuristics)**: Automatically scans each issue's payload to locate the SoC compatibility table/field behind the scenes. No manual field mapping required.
+* **High Performance API**: Backend utilizes asynchronous execution to run multiple JIRA requests concurrently.
+* **Applicability Mapping**: Automatically processes SoC Details and applies the status rules:
+  * `'X'` $\rightarrow$ **Not Applicable**
+  * `'O'` / `'THE'` / `'the'` $\rightarrow$ **Applicable**
+  * Others $\rightarrow$ **Not Applicable**
+* **Local SQLite Caching**: Caches fetched JIRA issue data locally in a `tvpm_cache.db` database.
+* **Local Ollama AI Integration**: Connects to a local Ollama server (e.g. Llama3) to:
+  * Run **AI-powered compatibility analysis** with human-readable explanation reasoning.
+  * Power an interactive **TVPM Chat Assistant** tab where you can select a cached TVPM and ask natural language questions.
+* **Excel Export**: Generates and formats a fresh result sheet with `S.No`, `TVPM ID`, `SoC Details`, and `Status` (and optional `AI Reason` if AI is enabled) columns.
+
+---
+
+## 🔍 Detailed Feature Walkthrough
+
+### 1. Excel & HTML Ingestion
+
+- **Robust Ingestion (`load_excel_or_html`)**: LGE JIRA systems often export search results as HTML tables but save them with `.xls` or `.xlsx` extensions. The backend parses the file header. If it detects `<!doctype html`, `<html`, or `<table`, it decodes the content as UTF-8 and uses `pd.read_html`; otherwise, it defaults to standard `pd.read_excel`.
+
+### 2. Dynamic Field Auto-Detection (Heuristics)
+
+- **Heuristic Resolver (`auto_detect_soc_field`)**: Instead of forcing the user to manually configure JIRA custom fields, the backend automatically scans the issue payload for:
+  - Any text field containing a JIRA table (delimited by `||` or `|`) with headers containing `"SOC"` or `"OS"`.
+  - Any string field with exact values like `"O"`, `"X"`, or `"THE"`.
+- If found, it automatically uses that field path (e.g. `fields.customfield_36507`) to extract compatibility details.
+
+### 3. Local SQLite Caching
+
+- **Cache Database (`tvpm_cache.db`)**: Stores fetched JIRA issue data locally in a `tvpm_issues` table containing:
+  - `key` (TEXT Primary Key)
+  - `summary` (TEXT)
+  - `soc_details` (TEXT)
+  - `status` (TEXT)
+  - `raw_json` (TEXT - complete JIRA JSON response)
+- This allows rapid local evaluation, offline mock mode operations, and feeds context into the AI Chat Assistant without making repetitive network calls.
+
+### 4. Local AI Mapping & Reasoning (Ollama)
+
+- **AI Compatibility Evaluation**: If "Use Local AI" is checked, the backend prompts the local Ollama LLM to parse the SoC compatibility details.
+- Ollama evaluates whether the issue is applicable for the target SoC model and returns structured JSON containing:
+  - `status`: Either `"Applicable"` or `"Not Applicable"`
+  - `reason`: A brief, human-readable justification of the mapping decision (e.g., *"Model k24 is marked O in the compatibility table, meaning it is supported."*)
+- This reasoning is appended as an extra **AI Reason** column in the Excel output.
+
+### 5. Interactive TVPM Chat Assistant
+
+- **Natural Language Assistant**: The user can select any cached TVPM key from a dropdown and ask natural language questions.
+- The `/api/chat-tvpm` endpoint builds a context-rich prompt containing the issue's key, summary, description, and custom fields, and feeds it into the local Ollama model to generate context-specific, technically accurate answers.
+
+### 6. Formatted Excel Export
+
+- Generates a fresh `.xlsx` spreadsheet with standard columns:
+  - `S.No`: Row serial number
+  - `TVPM ID`: JIRA Issue Key
+  - `SoC Details`: Raw value or extracted status from the table
+  - `Status`: Evaluated status (`Applicable` / `Not Applicable` / `Error: <details>`)
+  - `AI Reason` (Optional): The explanation returned by Ollama
+
+---
+
+## 📂 Project Structure
+
+```text
+tvpm_valid/
+├── .env                  # Local environment configuration file (ignored from git)
+├── .env.example          # Template environment config file
+├── requirements.txt      # Project library dependencies (includes lxml for HTML-disguised XLS)
+├── run.py                # Service runner script supporting Windows/macOS/Linux port management
+├── run.bat               # Windows batch launcher script for automatic venv setup and service start
+├── Final.md              # Unified documentation (this file)
+├── README.md             # Standard project readme
+├── response.json         # Local JIRA issue template used for Mock Mode
+├── tvpm_cache.db         # Local SQLite database caching fetched issues (gitignored)
+├── backend/
+│   ├── main.py           # FastAPI backend server containing logic & routes
+│   └── test_api.py       # Mock JIRA API unit tests for verification
+└── frontend/
+    └── app.py            # Streamlit web UI components & interactive tabs layout
+```
+
+---
+
+## 🚀 Quick Start Guide
+
+### 1. Prerequisites
+
+* **Python 3.8+** installed.
+* **Ollama** installed locally (Optional, only needed for AI Chat / AI Analysis features. Start it using `ollama run llama3`).
+
+### 2. Set Up Virtual Environment & Dependencies
+
+Create and activate a python virtual environment, then install requirements:
+
+**On macOS / Linux:**
+
+```bash
+# Create venv
+python3 -m venv .venv
+
+# Activate venv
+source .venv/bin/activate
+
+# Install requirements
+pip install -r requirements.txt
+```
+
+**On Windows (PowerShell):**
+
+```powershell
+# Create venv
+python -m venv .venv
+
+# Activate venv
+.\.venv\Scripts\Activate.ps1
+
+# Install requirements
+pip install -r requirements.txt
+```
+
+### 3. Environment Setup
+
+Create a `.env` file in the project root directory (you can copy `.env.example` as a template):
+
+```env
+# JIRA API Settings
+JIRA_BASE_URL=https://jira.lge.com
+JIRA_PAT=your_personal_access_token_here
+
+# Port Configurations
+BACKEND_PORT=8050
+FRONTEND_PORT=8501
+
+# Ollama Local AI Settings
+OLLAMA_URL=http://localhost:11434
+OLLAMA_MODEL=llama3
+```
+
+> [NOTE]
+> You can also leave `JIRA_PAT` blank if you only plan to run the tool in **Mock Mode** using the local `response.json` mock file.
+
+### 4. Run the Project
+
+#### On Windows:
+Double-click `run.bat` or run:
+```cmd
+run.bat
+```
+
+#### On macOS / Linux:
+Make sure your virtual environment is active, then start both backend and frontend concurrently:
+```bash
+python run.py
+```
+
+This will launch:
+
+* **FastAPI Backend**: `http://127.0.0.1:8050`
+* **Streamlit Web UI**: `http://127.0.0.1:8501`
+
+The browser will open automatically at the Streamlit URL.
+
+---
+
+## 🧪 Verification & Testing
+
+To run unit tests verifying JIRA connection, parsing, and status mapping rules:
+
+```bash
+.venv/bin/python backend/test_api.py
+```
+
+Outputs:
+
+```text
+Ran 3 tests in 0.156s
+OK
+```
