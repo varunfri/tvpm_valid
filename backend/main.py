@@ -201,7 +201,12 @@ async def fetch_jira_issue(client: httpx.AsyncClient, base_url: str, pat: str, k
             return {"key": key, "status": "error", "error": f"Mock error loading response.json: {str(e)}"}
 
 
-    url = f"{base_url.rstrip('/')}/rest/api/2/issue/{key}"
+    clean_base = base_url.rstrip('/')
+    if not clean_base.endswith("/issue") and "/issue/" not in clean_base:
+        url = f"{clean_base}/issue/rest/api/2/issue/{key}"
+    else:
+        url = f"{clean_base}/rest/api/2/issue/{key}"
+    print(f"[DEBUG] fetch_jira_issue: Dispatching live request to URL: {url}")
     headers = {
         "Authorization": f"Bearer {pat}",
         "Content-Type": "application/json"
