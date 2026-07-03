@@ -166,12 +166,26 @@ def map_soc_status(val: Any) -> str:
         # Fallback default rule
         return "Not Applicable"
 
+def check_mock_availability(mock: bool) -> bool:
+    if not mock:
+        return False
+    filepath = "response.json"
+    if not os.path.exists(filepath):
+        filepath = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "response.json")
+    if not os.path.exists(filepath):
+        print("[WARNING] mock=True requested but response.json not found. Disabling mock mode.")
+        return False
+    return True
+
+
 async def fetch_jira_issue(client: httpx.AsyncClient, base_url: str, pat: str, key: str, sem: asyncio.Semaphore, mock: bool = False) -> Dict[str, Any]:
     """
     Fetches a single issue from JIRA API using the /rest/api/2/issue/{key} endpoint.
     If mock=True, loads and returns mock data from response.json.
     Uses a Semaphore to throttle concurrent requests.
     """
+    print(f"[DEBUG] fetch_jira_issue: key={key}, mock={mock} (type={type(mock)}), base_url={base_url}")
+    mock = check_mock_availability(mock)
     if mock:
         try:
             filepath = "response.json"
@@ -185,6 +199,7 @@ async def fetch_jira_issue(client: httpx.AsyncClient, base_url: str, pat: str, k
             return {"key": key, "status": "success", "data": issue_data}
         except Exception as e:
             return {"key": key, "status": "error", "error": f"Mock error loading response.json: {str(e)}"}
+
 
     url = f"{base_url.rstrip('/')}/rest/api/2/issue/{key}"
     headers = {
@@ -354,6 +369,8 @@ async def fields_preview(
     base_url = jira_base_url or os.getenv("JIRA_BASE_URL")
     pat = jira_pat or os.getenv("JIRA_PAT")
     
+    mock = check_mock_availability(mock)
+    
     if not mock and (not base_url or not pat):
         raise HTTPException(status_code=400, detail="JIRA Base URL and PAT are required (either in .env or passed as form parameters)")
         
@@ -496,6 +513,11 @@ async def validate_tvpm(
     """
     base_url = jira_base_url or os.getenv("JIRA_BASE_URL")
     pat = jira_pat or os.getenv("JIRA_PAT")
+    
+    mock = check_mock_availability(mock)
+    
+    masked_pat = pat[:4] + "..." if pat else "None"
+    print(f"[DEBUG] validate_tvpm called: mock={mock} (type={type(mock)}), base_url={base_url}, pat={masked_pat}")
     
     if not mock and (not base_url or not pat):
         raise HTTPException(status_code=400, detail="JIRA Base URL and PAT are required.")
