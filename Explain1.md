@@ -1,6 +1,6 @@
 # TVPM Validation Tool: Feature Reference & Project Analysis Report
 
-This document provides a comprehensive analysis of the **TVPM Validation Tool** codebase. It outlines the system architecture, details the local SQLite caching and Ollama AI integration, and walks through the feature workflows.
+This document provides a comprehensive analysis of the **TVPM Validation Tool** codebase. It outlines the system architecture, explains feature workflows, highlights several critical bugs/gaps, and recommends actionable fixes.
 
 ---
 
@@ -8,31 +8,52 @@ This document provides a comprehensive analysis of the **TVPM Validation Tool** 
 
 The project is structured as a decoupled web application with a **FastAPI backend** (serving API requests) and a **Streamlit frontend** (interactive UI). It communicates with the internal LGE JIRA instance to validate issue applicability status based on SoC details.
 
-To optimize performance and add intelligent reasoning capabilities, the system uses a **local SQLite cache** to avoid redundant JIRA API calls, and interfaces with a **local Ollama LLM** to analyze compatibility tables and support natural language queries.
-
 ```mermaid
+%%{init: {'theme': 'default'}}%%
 sequenceDiagram
     actor User
     participant FE as Frontend (Streamlit)
     participant BE as Backend (FastAPI)
-    participant J as LGE JIRA API
+    participant DB as SQLite Cache (tvpm_cache.db)
+    participant J as LGE JIRA API (or Mock response.json)
+    participant O as Local Ollama LLM (AI)
 
-    User->>FE: Upload Excel/HTML (.xls/.xlsx)
-    Note over FE: Column auto-detection executes
-    FE->>BE: POST /api/fields-preview
-    BE->>J: GET /rest/api/2/issue/{first_key}
-    J-->>BE: JSON payload with fields
-    BE-->>FE: Flattened fields & sample values
-    FE->>User: Display mapping dropdowns
-    User->>FE: Select SoC field, target model & run validation
-    FE->>BE: POST /api/validate
-    Note over BE: Batch query with asyncio.Semaphore(15)
-    BE->>J: Parallel GET /rest/api/2/issue/{key}
-    J-->>BE: Issue details
-    Note over BE: Parse SoC details / tables & map statuses
-    BE->>BE: Compile new pandas DataFrame & write Excel
+    %% Validation Hub Flow
+    Note over User, O: -- Validation Hub Flow --
+    User->>FE: Upload Excel/HTML & enter Target SoC Name
+    FE->>BE: POST /api/validate (column, target_soc, mock, use_ai)
+    rect rgb(245, 245, 245)
+        Note over BE: For each TVPM ID in batch (asyncio.Semaphore 15)
+        BE->>DB: Query cached JIRA data
+        alt Cache Miss or Force Refresh
+            BE->>J: Fetch JIRA Issue (asynchronously)
+            J-->>BE: JIRA JSON payload
+            BE->>DB: Upsert Issue payload (raw_json, status, summary)
+        else Cache Hit
+            DB-->>BE: Cached JSON payload
+        end
+        Note over BE: Auto-detect SoC field in payload
+        alt use_ai = True
+            BE->>O: Query compatibility prompt (SoC Details, target_soc)
+            O-->>BE: Returns JSON (status, reason)
+        else use_ai = False
+            Note over BE: Standard regex/table parser resolves status
+        end
+    end
+    BE->>BE: Compile new DataFrame & write Excel
     BE-->>FE: Return Excel stream
-    FE->>User: Show metrics dashboard & download button
+    FE->>User: Show success dashboard & download button
+
+    %% TVPM Chat Assistant Flow
+    Note over User, O: -- TVPM Chat Assistant Flow --
+    User->>FE: Select TVPM key & ask natural language question
+    FE->>BE: POST /api/chat-tvpm (key, question)
+    BE->>DB: Fetch issue details & raw JIRA JSON
+    DB-->>BE: JIRA JSON
+    BE->>O: Send context-rich chat prompt (Issue Details + Question)
+    O-->>BE: Return answer text
+    BE-->>FE: Return answer JSON
+    FE->>User: Render chatbot response
 ```
 
 ---
